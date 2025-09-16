@@ -1,0 +1,74 @@
+name: 规则镜像（定时更新）
+
+on:
+  workflow_dispatch:        # 手动触发
+  schedule:
+    - cron: '5 6 * * *'     # 每天 06:05 UTC（北京时间 14:05）
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 准备目录
+        run: |
+          rm -rf public
+          mkdir -p public/data
+
+      - name: 拉取规则文件（失败不让任务报错，保证能继续）
+        run: |
+          set -eux
+          ad_url="${AD_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Advertising/Advertising.list}"
+          global_url="${GLOBAL_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Global/Global.list}"
+
+          curl -fsSL "$ad_url"     -o public/data/Advertising.list || : > public/data/Advertising.list
+          curl -fsSL "$global_url" -o public/data/Global.list      || : > public/data/Global.list
+
+          printf '{"version":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/version.json
+
+      - name: 生成首页
+        run: |
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>rules mirror</title>
+          <h1>规则镜像</h1>
+          <ul>
+            <li><a href="data/Advertising.list">Advertising.list</a></li>
+            <li><a href="data/Global.list">Global.list</a></li>
+            <li><a href="version.json">version.json</a></li>
+          </ul>
+          <p id="ts">更新时间加载中…</p>
+          <script>
+            fetch('version.json').then(r=>r.json()).then(j=>{
+              document.getElementById('ts').textContent = '更新时间：' + j.version;
+            }).catch(_=>{});
+          </script>
+          HTML
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传构建产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 发布到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
