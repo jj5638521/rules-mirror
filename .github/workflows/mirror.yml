@@ -1,51 +1,80 @@
-name: 规则镜像（定时更新）
+name: Mirror & Pages
 
 on:
-  workflow_dispatch:     # 允许手动触发
   schedule:
-    - cron: '0 */6 * * *'   # 每 6 小时自动运行一次（UTC 时间）
+    # 每30分钟同步一次（需要公开仓库或开启 Actions）
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+  push:
+    paths:
+      - ".github/workflows/mirror.yml"
 
 permissions:
-  contents: write          # 允许工作流向仓库提交代码
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
-  update:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取当前仓库
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
-      - name: 拉取源规则并生成版本信息
+      - name: Prepare public dir
         run: |
           set -e
-          mkdir -p data
-          # 你先用这两个公共源做演示，后面再按需要增删
-          curl -fsSL https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Advertising/Advertising.list -o data/Advertising.list
-          curl -fsSL https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Global/Global.list -o data/Global.list
+          rm -rf public && mkdir -p public
+          # 健康检查文件
+          echo '{ "status": "ok", "ts": "'$(date -u +%FT%TZ)'" }' > public/healthz.json
 
-          python - <<'PY'
-          import json, datetime, os
-          files = sorted(os.listdir('data'))
-          ver = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
-          out = {"version": ver, "utc": datetime.datetime.utcnow().isoformat()+"Z", "files": files}
-          with open('version.json', 'w', encoding='utf-8') as f:
-              json.dump(out, f, ensure_ascii=False, indent=2)
-          print(json.dumps(out, ensure_ascii=False, indent=2))
-          PY
-
-      - name: 提交并推送更新
+      # === 示例：从公开源镜像规则文件（请按需增减/替换）===
+      - name: Mirror upstream rules
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "没有变化，跳过提交"
-          else
-            git commit -m "chore: 自动更新 $(date -u +'%F %T')"
-            git push
-          fi
+          set -euo pipefail
+          # 这里示例使用公开项目 blackmatrix7/ios_rule_script 的原始文件
+          # 你可以把下面的 URL 替换成你真正需要的 RAW 文件链接
+          curl -fsSL https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Advertising/Advertising.list -o public/Advertising.list
+          curl -fsSL https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Global/Global.list -o public/Global.list
+
+          # 首页（可选）
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>rules-mirror</title>
+          <h1>rules-mirror</h1>
+          <ul>
+            <li><a href="Advertising.list">Advertising.list</a></li>
+            <li><a href="Global.list">Global.list</a></li>
+            <li><a href="healthz.json">healthz.json</a></li>
+          </ul>
+          <p>更新时间：<span id="ts"></span></p>
+          <script>
+            fetch('healthz.json').then(r=>r.json()).then(j=>{
+              document.getElementById('ts').textContent = j.ts;
+            });
+          </script>
+          HTML
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
