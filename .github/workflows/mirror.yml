@@ -1,9 +1,11 @@
-name: 规则镜像（定时更新）
+name: 规则镜像（有变化才发布｜每5分钟检查）
 
 on:
-  workflow_dispatch:            # 手动触发
+  # 手动触发
+  workflow_dispatch:
+  # 定时触发（UTC）：每 5 分钟一次
   schedule:
-    - cron: '5 6 * * *'         # 每天 06:05 UTC（北京时间 14:05）
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
@@ -17,25 +19,63 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 把“是否有变化”的判定传给 deploy 任务
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+
     steps:
       - name: 准备目录
         run: |
+          set -eux
           rm -rf public
           mkdir -p public/data
 
-      - name: 拉取规则文件（失败不终止）
+      - name: 拉取规则文件（支持仓库变量覆盖）
+        # 在仓库 Settings → Secrets and variables → Actions → Variables 里可配置：
+        # AD_URL / GLOBAL_URL 两个变量来替换默认上游
+        env:
+          AD_URL:     ${{ vars.AD_URL }}
+          GLOBAL_URL: ${{ vars.GLOBAL_URL }}
         run: |
           set -eux
           ad_url="${AD_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Advertising/Advertising.list}"
           global_url="${GLOBAL_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Global/Global.list}"
 
+          # 拉取失败时生成空文件但不中断（保障后续流程）
           curl -fsSL "$ad_url"     -o public/data/Advertising.list || : > public/data/Advertising.list
           curl -fsSL "$global_url" -o public/data/Global.list      || : > public/data/Global.list
 
-          # 记录 UTC 时间到版本文件
+          # 记录 UTC 时间，前端会转为北京时间显示
           printf '{"ts":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/version.json
 
+      - name: 与线上已发布内容比对，判断是否变化
+        id: diff
+        env:
+          SITE_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          # 新内容指纹
+          new_ad=$(sha256sum public/data/Advertising.list | cut -d' ' -f1)
+          new_gl=$(sha256sum public/data/Global.list      | cut -d' ' -f1)
+
+          # 线上已发布指纹（站点首次部署或 404 时容错为 0）
+          old_ad=$(curl -fsSL "$SITE_BASE/data/Advertising.list" | sha256sum | cut -d' ' -f1 || echo 0)
+          old_gl=$(curl -fsSL "$SITE_BASE/data/Global.list"      | sha256sum | cut -d' ' -f1 || echo 0)
+
+          echo "new_ad=$new_ad old_ad=$old_ad"
+          echo "new_gl=$new_gl old_gl=$old_gl"
+
+          if [ "$new_ad" = "$old_ad" ] && [ "$new_gl" = "$old_gl" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "未检测到变化，将跳过发布。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "检测到变化，将发布新版本。"
+          fi
+
       - name: 生成中文首页
+        if: steps.diff.outputs.changed == 'true'
         run: |
           cat > public/index.html <<'HTML'
 <!doctype html>
@@ -44,11 +84,10 @@ jobs:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>规则镜像</title>
 <style>
-  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.6;margin:24px;color:#1f2328}
+  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6;margin:24px;color:#1f2328;max-width:900px}
   h1{font-size:22px;margin:0 0 12px}
   ul{padding-left:18px;margin:12px 0}
-  a{color:#0969da;text-decoration:none}
-  a:hover{text-decoration:underline}
+  a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
   .muted{color:#6e7781;font-size:14px}
 </style>
 
@@ -82,20 +121,23 @@ jobs:
 HTML
 
       - name: 配置 Pages
+        if: steps.diff.outputs.changed == 'true'
         uses: actions/configure-pages@v5
 
       - name: 上传构建产物
+        if: steps.diff.outputs.changed == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
   deploy:
     needs: build
+    if: needs.build.outputs.changed == 'true'   # 只有检测到变化才部署
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: 发布到 GitHub Pages
+      - name: 部署到 GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
