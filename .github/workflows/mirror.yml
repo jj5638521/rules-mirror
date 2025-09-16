@@ -30,11 +30,10 @@ jobs:
           GLOBAL_URL: ${{ secrets.GLOBAL_URL }}
         run: |
           set -eux
-          # 默认上游（未配置 Secrets 时使用）
           ad_url="${AD_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Advertising/Advertising.list}"
           global_url="${GLOBAL_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Global/Global.list}"
-          echo "AD_URL=$ad_url"         >> $GITHUB_ENV
-          echo "GLOBAL_URL=$global_url" >> $GITHUB_ENV
+          echo "AD_URL=$ad_url"         >> "$GITHUB_ENV"
+          echo "GLOBAL_URL=$global_url" >> "$GITHUB_ENV"
 
       - name: 拉取规则（失败不让任务中断）
         run: |
@@ -53,42 +52,41 @@ jobs:
         run: |
           set -eux
           cat > public/index.html <<'HTML'
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>规则镜像</title>
-<style>
-  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6;margin:20px;}
-  h1{font-size:22px;margin:0 0 12px}
-  ul{padding-left:18px;margin:12px 0}
-  a{color:#0969da;text-decoration:none}
-  a:hover{text-decoration:underline}
-  .muted{color:#6e7781;font-size:14px}
-</style>
+          <!doctype html>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>规则镜像</title>
+          <style>
+            body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6;margin:20px;}
+            h1{font-size:22px;margin:0 0 12px}
+            ul{padding-left:18px;margin:12px 0}
+            a{color:#0969da;text-decoration:none}
+            a:hover{text-decoration:underline}
+            .muted{color:#6e7781;font-size:14px}
+          </style>
 
-<h1>规则镜像</h1>
-<ul>
-  <li><a id="a1" href="data/Advertising.list">广告规则（Advertising.list）</a></li>
-  <li><a id="a2" href="data/Global.list">全球规则（Global.list）</a></li>
-  <li><a id="a3" href="version.json">版本元信息（version.json）</a></li>
-</ul>
-<p class="muted" id="ts">更新时间：读取中…</p>
+          <h1>规则镜像</h1>
+          <ul>
+            <li><a id="a1" href="data/Advertising.list">广告规则（Advertising.list）</a></li>
+            <li><a id="a2" href="data/Global.list">全球规则（Global.list）</a></li>
+            <li><a id="a3" href="version.json">版本元信息（version.json）</a></li>
+          </ul>
+          <p class="muted" id="ts">更新时间：读取中…</p>
 
-<script>
-  fetch('version.json',{cache:'no-store'})
-    .then(r=>r.json())
-    .then(j=>{
-      const v = j.version || '';
-      document.getElementById('ts').textContent = '更新时间：' + v;
-      // 追加 ?v=… 防缓存
-      ['a1','a2','a3'].forEach(id=>{
-        const a = document.getElementById(id);
-        a.href = a.getAttribute('href') + '?v=' + encodeURIComponent(v);
-      });
-    })
-    .catch(()=>{ document.getElementById('ts').textContent = '更新时间：获取失败'; });
-</script>
-HTML
+          <script>
+            fetch('version.json',{cache:'no-store'})
+              .then(r=>r.json())
+              .then(j=>{
+                const v = j.version || '';
+                document.getElementById('ts').textContent = '更新时间：' + v;
+                ['a1','a2','a3'].forEach(id=>{
+                  const a = document.getElementById(id);
+                  a.href = a.getAttribute('href') + '?v=' + encodeURIComponent(v);
+                });
+              })
+              .catch(()=>{ document.getElementById('ts').textContent = '更新时间：获取失败'; });
+          </script>
+          HTML
 
       - name: 配置 Pages
         uses: actions/configure-pages@v5
