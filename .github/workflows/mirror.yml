@@ -1,9 +1,9 @@
 name: 规则镜像（定时更新）
 
 on:
-  workflow_dispatch:        # 手动触发
+  workflow_dispatch:            # 手动触发
   schedule:
-    - cron: '5 6 * * *'     # 每天 06:05 UTC（北京时间 14:05）
+    - cron: '5 6 * * *'         # 每天 06:05 UTC（北京时间 14:05）
 
 permissions:
   contents: read
@@ -23,7 +23,7 @@ jobs:
           rm -rf public
           mkdir -p public/data
 
-      - name: 拉取规则文件（失败不让任务报错，保证能继续）
+      - name: 拉取规则文件（失败不终止）
         run: |
           set -eux
           ad_url="${AD_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Advertising/Advertising.list}"
@@ -32,27 +32,54 @@ jobs:
           curl -fsSL "$ad_url"     -o public/data/Advertising.list || : > public/data/Advertising.list
           curl -fsSL "$global_url" -o public/data/Global.list      || : > public/data/Global.list
 
-          printf '{"version":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/version.json
+          # 记录 UTC 时间到版本文件
+          printf '{"ts":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/version.json
 
-      - name: 生成首页
+      - name: 生成中文首页
         run: |
           cat > public/index.html <<'HTML'
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>rules mirror</title>
-          <h1>规则镜像</h1>
-          <ul>
-            <li><a href="data/Advertising.list">Advertising.list</a></li>
-            <li><a href="data/Global.list">Global.list</a></li>
-            <li><a href="version.json">version.json</a></li>
-          </ul>
-          <p id="ts">更新时间加载中…</p>
-          <script>
-            fetch('version.json').then(r=>r.json()).then(j=>{
-              document.getElementById('ts').textContent = '更新时间：' + j.version;
-            }).catch(_=>{});
-          </script>
-          HTML
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>规则镜像</title>
+<style>
+  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.6;margin:24px;color:#1f2328}
+  h1{font-size:22px;margin:0 0 12px}
+  ul{padding-left:18px;margin:12px 0}
+  a{color:#0969da;text-decoration:none}
+  a:hover{text-decoration:underline}
+  .muted{color:#6e7781;font-size:14px}
+</style>
+
+<h1>规则镜像</h1>
+
+<ul>
+  <li><a href="data/Advertising.list">广告规则（Advertising.list）</a></li>
+  <li><a href="data/Global.list">全局直连规则（Global.list）</a></li>
+  <li><a href="version.json">版本信息（version.json）</a></li>
+</ul>
+
+<p class="muted">更新时间：<span id="ts">正在获取…</span></p>
+
+<script>
+  // 读取版本时间并以北京时间展示
+  fetch('version.json')
+    .then(r => r.json())
+    .then(j => {
+      const raw = j.ts || j.time || j.updated || j.updated_at || j.version;
+      const d = raw ? new Date(raw) : new Date();
+      const fmt = new Intl.DateTimeFormat('zh-CN', {
+        year:'numeric', month:'2-digit', day:'2-digit',
+        hour:'2-digit', minute:'2-digit', second:'2-digit',
+        hour12:false, timeZone:'Asia/Shanghai'
+      }).format(d);
+      document.getElementById('ts').textContent = fmt + '（北京时间）';
+    })
+    .catch(() => { document.getElementById('ts').textContent = '获取失败'; });
+</script>
+</html>
+HTML
 
       - name: 配置 Pages
         uses: actions/configure-pages@v5
