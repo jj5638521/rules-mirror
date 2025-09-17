@@ -1,134 +1,171 @@
 name: Mirror rules to Pages（同步规则到 Pages）
 
-on:
-  workflow_dispatch: {}                 # 手动运行（Run workflow）
-  schedule:
-    - cron: "*/10 * * * *"             # 可选：每 10 分钟同步一次（可按需调整/删除）
-
 permissions:
   contents: write
 
+on:
+  # A. 主仓库发布后可远程触发
+  repository_dispatch:
+    types: [sync_rules]
+  # B. 手动运行（界面上会出现输入框）
+  workflow_dispatch:
+    inputs:
+      url:
+        description: RAW latest 地址（如：https://raw.githubusercontent.com/.../rules/01_工资模块_latest.md?plain=1）
+        required: false
+      version:
+        description: 版本号（形如 v2025-09-17R7，可留空自动解析）
+        required: false
+  # C. 可选定时同步（需要可保留）
+  schedule:
+    - cron: "*/10 * * * *"
+
 concurrency:
   group: mirror-rules-to-pages
-  cancel-in-progress: false             # 同步任务串行，避免竞态
+  cancel-in-progress: false
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    env:
+      RAW_LATEST: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/main/rules/01_工资模块_latest.md?plain=1"
+      RELEASES_API: "https://api.github.com/repos/jj5638521/huijiang-assistant/releases/latest"
+      TAG_RAW_TMPL: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/%s/rules/01_工资模块_%s.md?plain=1"
+      # 稳定回退（可按需更新）
+      STABLE_TAG: "v2025-09-15R6-HF4"
+      STABLE_URL: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/v2025-09-15R6-HF4/rules/01_工资模块_v2025-09-15R6-HF4.md?plain=1"
+
     steps:
-      - name: Checkout rules-mirror（检出镜像仓）
+      - name: Checkout（检出镜像仓）
         uses: actions/checkout@v4
 
-      - name: Prepare tools（安装工具）
+      - name: Resolve inputs（解析输入与默认值）
+        id: inp
+        shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+          set -euo pipefail
+          # repository_dispatch 的 client_payload 优先
+          URL="${{ github.event.client_payload.url || '' }}"
+          VER="${{ github.event.client_payload.version || '' }}"
+          # 手动运行的 inputs 作为次选
+          if [ -z "$URL" ]; then URL="${{ inputs.url || '' }}"; fi
+          if [ -z "$VER" ]; then VER="${{ inputs.version || '' }}"; fi
+          # 最后兜底：默认拉 RAW latest
+          if [ -z "$URL" ]; then URL="${RAW_LATEST}"; fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "ver_input=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch with fallback + integrity check（带回退链路与完整性校验的抓取）
+      - name: Fetch with fallback + integrity check（抓取 + 校验 + 版本解析）
         id: fetch
         shell: bash
-        env:
-          RAW_LATEST: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/main/rules/01_工资模块_latest.md?plain=1"
-          RELEASES_API: "https://api.github.com/repos/jj5638521/huijiang-assistant/releases/latest"
-          TAG_RAW_TMPL: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/%s/rules/01_工资模块_%s.md?plain=1"
-          STABLE_TAG: "v2025-09-15R6-HF4"  # 固定稳定回退（强稳定）
-          STABLE_URL: "https://raw.githubusercontent.com/jj5638521/huijiang-assistant/v2025-09-15R6-HF4/rules/01_工资模块_v2025-09-15R6-HF4.md?plain=1"
         run: |
           set -euo pipefail
           mkdir -p payroll
-          WORK=payroll/active.md.new
+          TMP="payroll/active.md.new"
 
           fetch_url() { # $1=url
-            echo "::group::Fetch $1"
-            # Pages 抓取里我们要求 text/markdown 也算有效；RAW 这边本就是 text/plain
-            curl -fsSL --connect-timeout 2 --max-time 6 -H 'Accept: text/plain, text/markdown' "$1" -o "$WORK" || return 1
+            local u="$1"
+            # 附带 cache-buster
+            if [[ "$u" != *"?plain=1"* && "$u" != *"&plain=1"* ]]; then
+              # 若无 plain=1，不强加；只加 ts
+              :
+            fi
+            if [[ "$u" == *"?"* ]]; then
+              u="${u}&ts=$(date +%s)"
+            else
+              u="${u}?ts=$(date +%s)"
+            fi
+            echo "::group::Fetch $u"
+            curl -fsSL --connect-timeout 3 --max-time 8 -H 'Accept: text/plain, text/markdown' "$u" -o "$TMP"
             echo "::endgroup::"
           }
 
-          integrity_check() {
+          # 仅做稳健必需校验：标题/版本/生效（兼容中英文括号、版本两种写法）
+          integrity_and_parse() {
             local f="$1"
-            # 四要素：标题/版本/生效/尾行 U+2212
-            grep -q '^# 01_工资模块（' "$f" || { echo "缺标题前缀"; return 2; }
-            grep -q '^[[:space:]]*版本：' "$f"   || { echo "缺“版本：”"; return 2; }
-            grep -q '^[[:space:]]*生效：' "$f"   || { echo "缺“生效：”"; return 2; }
-            grep -q '^## 结算清单尾行（固定展示，默认开启）' "$f" || { echo "缺“结算清单尾行”章节"; return 2; }
-            # 最后一行必须是数学减号 U+2212（不是 ASCII '-'）
-            last_line="$(awk 'NF{last=$0}END{print last}' "$f")"
-            if [ "$last_line" != "−" ]; then
-              echo "最后一行不是 U+2212（应为：‘−’），当前：『$last_line』"
-              return 2
+            # 标题：允许全/半角括号
+            grep -Eq '^# 01_工资模块[（(]' "$f" || { echo "缺合法标题"; return 2; }
+
+            # 版本：兼容两种格式
+            # 1) 新式：版本 vYYYY-MM-DDRn
+            if grep -Eq '^[[:space:]]*版本 v[0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+$' "$f"; then
+              ver_line=$(grep -m1 '^[[:space:]]*版本 v[0-9]' "$f")
+              ver=$(echo "$ver_line" | awk '{print $2}')
+            else
+              # 2) 旧式：版本：YYYY-MM-DDRn（全/半角冒号均可），解析后补 v 前缀
+              if grep -Eq '^[[:space:]]*版本[:：][[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+$' "$f"; then
+                ver=$(grep -m1 '^[[:space:]]*版本[:：]' "$f" | sed 's/.*[:：][[:space:]]*//')
+                ver="v${ver}"
+              else
+                echo "未找到合法版本行"; return 2
+              fi
             fi
+
+            # 生效：支持“生效 2025-09-17”或“生效：2025-09-17”
+            if grep -Eq '^[[:space:]]*生效([[:space:]]|[:：])[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$f"; then
+              eff=$(grep -m1 '^[[:space:]]*生效' "$f" | sed 's/.*[:： ]\+[[:space:]]*//')
+            else
+              echo "未找到生效日期"; return 2
+            fi
+
+            echo "version=$ver"   >> "$GITHUB_OUTPUT"
+            echo "effective=$eff" >> "$GITHUB_OUTPUT"
             return 0
           }
 
-          pick_version() {
-            # 提取版本与生效日用于提交信息与 meta
-            ver="$(grep -m1 '^[[:space:]]*版本：' "$WORK" | sed 's/.*：//')"
-            eff="$(grep -m1 '^[[:space:]]*生效：' "$WORK" | sed 's/.*：//')"
-            echo "version=$ver" >> "$GITHUB_OUTPUT"
-            echo "effective=$eff" >> "$GITHUB_OUTPUT"
-          }
+          SRC=""
+          URL="${{ steps.inp.outputs.url }}"
 
-          # 回退链路：RAW latest → releases/latest → tag RAW → STABLE_URL
-          echo "尝试 RAW latest…"
-          if fetch_url "$RAW_LATEST" && integrity_check "$WORK"; then
-            src="raw"
+          echo "尝试：指定/默认 URL"
+          if fetch_url "$URL" && integrity_and_parse "$TMP"; then
+            SRC="raw"
           else
-            echo "RAW latest 失败或校验未过，尝试 releases/latest 取 tag…"
-            tag="$(curl -fsSL --connect-timeout 2 --max-time 6 "$RELEASES_API" | jq -r '.tag_name // empty')"
+            echo "指定/默认 URL 失败，尝试 releases/latest → tag RAW"
+            # 取最新 release 的 tag
+            tag=$(curl -fsSL --connect-timeout 3 --max-time 6 "${RELEASES_API}" | grep -Eo '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*:"\([^"]\+\)".*/\1/')
             if [ -n "${tag:-}" ]; then
-              url_tag=$(printf "$TAG_RAW_TMPL" "$tag" "$tag")
+              url_tag=$(printf "${TAG_RAW_TMPL}" "$tag" "$tag")
               echo "尝试 tag RAW：$url_tag"
-              if fetch_url "$url_tag" && integrity_check "$WORK"; then
-                src="tag:$tag"
+              if fetch_url "$url_tag" && integrity_and_parse "$TMP"; then
+                SRC="tag:${tag}"
               fi
             fi
-            if [ -z "${src:-}" ]; then
-              echo "尝试稳定回退 STABLE：$STABLE_URL"
-              if fetch_url "$STABLE_URL" && integrity_check "$WORK"; then
-                src="stable:$STABLE_TAG"
+            # 稳定回退
+            if [ -z "${SRC}" ]; then
+              echo "尝试稳定回退：${STABLE_URL}"
+              if fetch_url "${STABLE_URL}" && integrity_and_parse "$TMP"; then
+                SRC="stable:${STABLE_TAG}"
               fi
             fi
           fi
 
-          if [ -z "${src:-}" ]; then
+          if [ -z "${SRC}" ]; then
             echo "::warning ::所有远端源不可用或校验失败，保持现有 active.md（若存在）不变。"
             echo "updated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # 将 new 覆盖到正式文件
-          mv "$WORK" payroll/active.md
+          # 覆盖正式文件 + 生成 TXT + 写 meta
+          mv "$TMP" payroll/active.md
+          sed 's/\r$//' payroll/active.md > payroll/active.txt
+          printf '' > .nojekyll
 
-          # 旁路：生成 text/plain 版（active.txt）
-          cp payroll/active.md payroll/active.txt
-
-          # 写 meta（可选调试用）
-          cat > payroll/meta.json <<META
-          {
-            "source": "${src}",
-            "version": "$(grep -m1 '^[[:space:]]*版本：' payroll/active.md | sed 's/.*：//')",
-            "effective": "$(grep -m1 '^[[:space:]]*生效：' payroll/active.md | sed 's/.*：//')",
-            "updated_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          }
-          META
-
-          pick_version
-          echo "source=$src" >> "$GITHUB_OUTPUT"
-          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "source=${SRC}" >> "$GITHUB_OUTPUT"
+          echo "updated=true"  >> "$GITHUB_OUTPUT"
 
       - name: Commit if changed（有变更才提交）
         if: steps.fetch.outputs.updated == 'true'
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add payroll/active.md payroll/active.txt payroll/meta.json .nojekyll || true
+          git add payroll/active.md payroll/active.txt .nojekyll || true
           if ! git diff --cached --quiet; then
-            ver="${{ steps.fetch.outputs.version }}"
-            eff="${{ steps.fetch.outputs.effective }}"
-            src="${{ steps.fetch.outputs.source }}"
-            git commit -m "Mirror: update active (ver=${ver:-unknown}, eff=${eff:-unknown}, src=${src:-unknown})"
+            ver="${{ steps.fetch.outputs.version || '' }}"
+            eff="${{ steps.fetch.outputs.effective || '' }}"
+            src="${{ steps.fetch.outputs.source || '' }}"
+            git commit -m "Mirror: update active (ver=${ver:-n/a}, eff=${eff:-n/a}, src=${src:-n/a})"
             git push
           else
             echo "No change."
@@ -138,14 +175,13 @@ jobs:
         run: |
           {
             echo "### Mirror result"
-            echo "- updated: **${{ steps.fetch.outputs.updated }}**"
-            echo "- source : **${{ steps.fetch.outputs.source || 'n/a' }}**"
-            echo "- version: **${{ steps.fetch.outputs.version || 'n/a' }}**"
+            echo "- updated : **${{ steps.fetch.outputs.updated }}**"
+            echo "- source  : **${{ steps.fetch.outputs.source || 'n/a' }}**"
+            echo "- version : **${{ steps.fetch.outputs.version || 'n/a' }}**"
             echo "- effective: **${{ steps.fetch.outputs.effective || 'n/a' }}**"
             echo ""
-            echo "生成文件："
-            echo "- \`payroll/active.md\`（主文件，Pages 将直接渲染为 text/markdown）"
-            echo "- \`payroll/active.txt\`（纯文本旁路，方便只认 text/plain 的工具）"
-            echo "- \`.nojekyll\`（禁用 Jekyll，防止渲染成 HTML）"
-            echo "- \`payroll/meta.json\`（可选元数据，调试用）"
+            echo "生成："
+            echo "- payroll/active.md （Pages 主文件，text/markdown）"
+            echo "- payroll/active.txt （text/plain 旁路）"
+            echo "- .nojekyll"
           } >> "$GITHUB_STEP_SUMMARY"
