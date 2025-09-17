@@ -66,10 +66,6 @@ jobs:
           fetch_url() { # $1=url
             local u="$1"
             # 附带 cache-buster
-            if [[ "$u" != *"?plain=1"* && "$u" != *"&plain=1"* ]]; then
-              # 若无 plain=1，不强加；只加 ts
-              :
-            fi
             if [[ "$u" == *"?"* ]]; then
               u="${u}&ts=$(date +%s)"
             else
@@ -145,7 +141,7 @@ jobs:
             exit 0
           fi
 
-          # 覆盖正式文件 + 生成 TXT + 写 meta
+          # 覆盖正式文件 + 生成 TXT + 写 .nojekyll
           mv "$TMP" payroll/active.md
           sed 's/\r$//' payroll/active.md > payroll/active.txt
           printf '' > .nojekyll
@@ -171,6 +167,29 @@ jobs:
             echo "No change."
           fi
 
+      # 新增：无内容更新也触发 Pages（制造最小变更）
+      - name: Force minimal touch commit（无变更也触发部署）
+        if: steps.fetch.outputs.updated != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$(date -u +%Y%m%dT%H%M%SZ)" > .pages-touch
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .pages-touch
+          git commit -m "Mirror: touch to trigger Pages (no content change)"
+          git push
+
+      # 新增：显式请求 GitHub Pages 重新构建（兜底）
+      - name: Trigger GitHub Pages rebuild（兜底刷新）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/pages/builds
+
       - name: Summary（运行摘要）
         run: |
           {
@@ -184,4 +203,5 @@ jobs:
             echo "- payroll/active.md （Pages 主文件，text/markdown）"
             echo "- payroll/active.txt （text/plain 旁路）"
             echo "- .nojekyll"
+            echo "- .pages-touch（仅在无内容更新时生成，用于触发部署）"
           } >> "$GITHUB_STEP_SUMMARY"
