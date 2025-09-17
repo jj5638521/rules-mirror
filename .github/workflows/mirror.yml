@@ -14,7 +14,7 @@ on:
         description: RAW latest 地址（如：https://raw.githubusercontent.com/.../rules/01_工资模块_latest.md?plain=1）
         required: false
       version:
-        description: 版本号（形如 v2025-09-17R7，可留空自动解析）
+        description: 版本号（形如 v2025-09-17R7 或 v2025-09-17R7-HF2，可留空自动解析）
         required: false
   # C. 可选定时同步（需要可保留）
   schedule:
@@ -72,25 +72,26 @@ jobs:
               u="${u}?ts=$(date +%s)"
             fi
             echo "::group::Fetch $u"
-            curl -fsSL --connect-timeout 3 --max-time 8 -H 'Accept: text/plain, text/markdown' "$u" -o "$TMP"
+            curl -fsSL --connect-timeout 3 --max-time 8 \
+                 -H 'Accept: text/plain, text/markdown' "$u" -o "$TMP"
             echo "::endgroup::"
           }
 
-          # 仅做稳健必需校验：标题/版本/生效（兼容中英文括号、版本两种写法）
+          # 必要校验：标题/版本/生效（兼容中英文括号、版本两种写法与 -HFx）
           integrity_and_parse() {
             local f="$1"
             # 标题：允许全/半角括号
             grep -Eq '^# 01_工资模块[（(]' "$f" || { echo "缺合法标题"; return 2; }
 
-            # 版本：兼容两种格式
-            # 1) 新式：版本 vYYYY-MM-DDRn
-            if grep -Eq '^[[:space:]]*版本 v[0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+$' "$f"; then
-              ver_line=$(grep -m1 '^[[:space:]]*版本 v[0-9]' "$f")
-              ver=$(echo "$ver_line" | awk '{print $2}')
+            # 版本：两种写法 + 可选 -HFx
+            # 1) 新式：版本 vYYYY-MM-DDRn[-HFx]
+            if grep -Eq '^[[:space:]]*版本[ ：]v[0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+(-HF[0-9]+)?$' "$f"; then
+              ver_line=$(grep -m1 '^[[:space:]]*版本[ ：]v' "$f")
+              ver=$(echo "$ver_line" | sed 's/^[[:space:]]*版本[ ：]//')
             else
-              # 2) 旧式：版本：YYYY-MM-DDRn（全/半角冒号均可），解析后补 v 前缀
-              if grep -Eq '^[[:space:]]*版本[:：][[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+$' "$f"; then
-                ver=$(grep -m1 '^[[:space:]]*版本[:：]' "$f" | sed 's/.*[:：][[:space:]]*//')
+              # 2) 旧式：版本：YYYY-MM-DDRn[-HFx]（全/半角冒号均可），解析后补 v
+              if grep -Eq '^[[:space:]]*版本[ ：][0-9]{4}-[0-9]{2}-[0-9]{2}R[0-9]+(-HF[0-9]+)?$' "$f"; then
+                ver=$(grep -m1 '^[[:space:]]*版本[ ：]' "$f" | sed 's/^[[:space:]]*版本[ ：]//')
                 ver="v${ver}"
               else
                 echo "未找到合法版本行"; return 2
@@ -98,8 +99,8 @@ jobs:
             fi
 
             # 生效：支持“生效 2025-09-17”或“生效：2025-09-17”
-            if grep -Eq '^[[:space:]]*生效([[:space:]]|[:：])[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$f"; then
-              eff=$(grep -m1 '^[[:space:]]*生效' "$f" | sed 's/.*[:： ]\+[[:space:]]*//')
+            if grep -Eq '^[[:space:]]*生效([[:space:]]|[ ：])[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$f"; then
+              eff=$(grep -m1 '^[[:space:]]*生效' "$f" | sed 's/.*[ ：]\{0,1\}[[:space:]]*//')
             else
               echo "未找到生效日期"; return 2
             fi
@@ -117,7 +118,6 @@ jobs:
             SRC="raw"
           else
             echo "指定/默认 URL 失败，尝试 releases/latest → tag RAW"
-            # 取最新 release 的 tag
             tag=$(curl -fsSL --connect-timeout 3 --max-time 6 "${RELEASES_API}" | grep -Eo '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed 's/.*:"\([^"]\+\)".*/\1/')
             if [ -n "${tag:-}" ]; then
               url_tag=$(printf "${TAG_RAW_TMPL}" "$tag" "$tag")
@@ -126,7 +126,6 @@ jobs:
                 SRC="tag:${tag}"
               fi
             fi
-            # 稳定回退
             if [ -z "${SRC}" ]; then
               echo "尝试稳定回退：${STABLE_URL}"
               if fetch_url "${STABLE_URL}" && integrity_and_parse "$TMP"; then
@@ -141,10 +140,18 @@ jobs:
             exit 0
           fi
 
-          # 覆盖正式文件 + 生成 TXT + 写 .nojekyll
+          # 覆盖正式文件 + 生成 TXT + 写 .nojekyll + meta
           mv "$TMP" payroll/active.md
           sed 's/\r$//' payroll/active.md > payroll/active.txt
           printf '' > .nojekyll
+          {
+            echo "{"
+            echo "  \"source\": \"${SRC}\","
+            echo "  \"version\": \"${{ steps.fetch.outputs.version }}\","
+            echo "  \"effective\": \"${{ steps.fetch.outputs.effective }}\","
+            echo "  \"updated_at\": \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\""
+            echo "}"
+          } > payroll/meta.json
 
           echo "source=${SRC}" >> "$GITHUB_OUTPUT"
           echo "updated=true"  >> "$GITHUB_OUTPUT"
@@ -156,18 +163,18 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add payroll/active.md payroll/active.txt .nojekyll || true
+          git add payroll/active.md payroll/active.txt payroll/meta.json .nojekyll || true
           if ! git diff --cached --quiet; then
-            ver="${{ steps.fetch.outputs.version || '' }}"
-            eff="${{ steps.fetch.outputs.effective || '' }}"
-            src="${{ steps.fetch.outputs.source || '' }}"
+            ver='${{ steps.fetch.outputs.version || '' }}'
+            eff='${{ steps.fetch.outputs.effective || '' }}'
+            src='${{ steps.fetch.outputs.source || '' }}'
             git commit -m "Mirror: update active (ver=${ver:-n/a}, eff=${eff:-n/a}, src=${src:-n/a})"
             git push
           else
             echo "No change."
           fi
 
-      # 新增：无内容更新也触发 Pages（制造最小变更）
+      # 无内容更新也触发 Pages（制造最小变更）
       - name: Force minimal touch commit（无变更也触发部署）
         if: steps.fetch.outputs.updated != 'true'
         shell: bash
@@ -180,7 +187,7 @@ jobs:
           git commit -m "Mirror: touch to trigger Pages (no content change)"
           git push
 
-      # 新增：显式请求 GitHub Pages 重新构建（兜底）
+      # 显式请求 GitHub Pages 重新构建（兜底）
       - name: Trigger GitHub Pages rebuild（兜底刷新）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,6 +209,7 @@ jobs:
             echo "生成："
             echo "- payroll/active.md （Pages 主文件，text/markdown）"
             echo "- payroll/active.txt （text/plain 旁路）"
+            echo "- payroll/meta.json（调试用）"
             echo "- .nojekyll"
             echo "- .pages-touch（仅在无内容更新时生成，用于触发部署）"
           } >> "$GITHUB_STEP_SUMMARY"
